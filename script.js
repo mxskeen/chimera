@@ -65,13 +65,7 @@ class AdvancedMultiModelAI {
         };
         this.currentStreamController = null;
 
-        // NEW: File Upload Support
-        this.fileUploadConfig = {
-            maxFileSize: 10 * 1024 * 1024, // 10MB
-            allowedTypes: ['.txt', '.md', '.json', '.csv', '.pdf', '.doc', '.docx'],
-            maxFiles: 5
-        };
-        this.uploadedFiles = [];
+
 
         // NEW: Lazy Loading for Models
         this.modelLoadingState = new Map();
@@ -1107,7 +1101,6 @@ class AdvancedMultiModelAI {
         this.toast = document.getElementById('toast');
 
         // NEW: Initialize advanced features
-        this.initializeFileUpload();
         this.initializeLazyLoading();
         this.initializeWorker();
         this.initializeTouchGestures();
@@ -1120,7 +1113,6 @@ class AdvancedMultiModelAI {
     clearChat() {
         this.chatMessages.innerHTML = '';
         this.chatHistory = [];
-        this.uploadedFiles = [];
 
         if (this.chatStorage.currentSessionId) {
             this.createNewSession();

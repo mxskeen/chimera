@@ -2,7 +2,7 @@
 
 A cutting-edge, production-ready AI interface featuring advanced multi-model collaboration, intelligent task workflows, real-time streaming responses, and comprehensive performance optimizations. Experience enterprise-grade conversational AI with multiple models working together seamlessly.
 
-## 🚀 Core Features
+## Core Features
 
 ### **Three AI Collaboration Strategies**
 
