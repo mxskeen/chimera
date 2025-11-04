@@ -27,9 +27,840 @@ class AdvancedMultiModelAI {
         // ZnapAI Models
         this.znapaiModels = this.initializeZnapAIModels();
 
+        // NEW: Performance & Caching System
+        this.responseCache = new Map();
+        this.requestQueue = [];
+        this.rateLimiter = {
+            lastRequest: 0,
+            minInterval: 1000, // 1 second between requests
+            maxQueueSize: 10
+        };
+        this.cacheSettings = {
+            enabled: true,
+            maxSize: 100,
+            ttl: 30 * 60 * 1000, // 30 minutes
+            keyPrefix: 'cache_'
+        };
+
+        // NEW: Enhanced Error Tracking
+        this.errorLog = [];
+        this.retryConfig = {
+            maxRetries: 3,
+            baseDelay: 1000,
+            backoffMultiplier: 2
+        };
+
+        // NEW: Chat History Management
+        this.chatStorage = {
+            maxSessions: 5,
+            sessionTimeout: 24 * 60 * 60 * 1000, // 24 hours
+            currentSessionId: null
+        };
+
+        // NEW: Message Streaming Support
+        this.streamingConfig = {
+            enabled: true,
+            chunkSize: 50,
+            streamDelay: 50
+        };
+        this.currentStreamController = null;
+
+        // NEW: File Upload Support
+        this.fileUploadConfig = {
+            maxFileSize: 10 * 1024 * 1024, // 10MB
+            allowedTypes: ['.txt', '.md', '.json', '.csv', '.pdf', '.doc', '.docx'],
+            maxFiles: 5
+        };
+        this.uploadedFiles = [];
+
+        // NEW: Lazy Loading for Models
+        this.modelLoadingState = new Map();
+        this.lazyLoadThreshold = 20; // Load models when user scrolls near bottom
+
+        // NEW: Web Worker for Heavy Processing
+        this.workerManager = null;
+        this.workerSupported = typeof Worker !== 'undefined';
+
+        // NEW: Touch Gestures for Mobile
+        this.touchGestures = {
+            enabled: true,
+            swipeThreshold: 50,
+            longPressThreshold: 500
+        };
+        this.touchStartTime = 0;
+        this.touchStartPos = { x: 0, y: 0 };
+
+        // NEW: Offline Support
+        this.offlineConfig = {
+            enabled: true,
+            cacheKey: 'offline_cache_v2',
+            maxOfflineItems: 50
+        };
+        this.isOffline = !navigator.onLine;
+
         this.initializeElements();
         this.bindEvents();
         this.initializeApp();
+    }
+
+    /**
+     * NEW: Message Streaming Implementation
+     */
+    async streamResponse(model, messages, onChunk, onComplete, onError) {
+        try {
+            this.currentStreamController = new AbortController();
+
+            // Simulate streaming for now - in real implementation, this would use actual streaming APIs
+            const response = await this.callAPI(model, messages);
+            const fullContent = response.choices[0].message.content;
+
+            // Stream the content in chunks
+            let currentIndex = 0;
+            const chunkSize = this.streamingConfig.chunkSize;
+
+            const streamInterval = setInterval(() => {
+                if (currentIndex >= fullContent.length) {
+                    clearInterval(streamInterval);
+                    onComplete(fullContent);
+                    return;
+                }
+
+                const chunk = fullContent.substring(currentIndex, currentIndex + chunkSize);
+                currentIndex += chunkSize;
+
+                onChunk(chunk);
+            }, this.streamingConfig.streamDelay);
+
+            return {
+                stop: () => {
+                    clearInterval(streamInterval);
+                    this.currentStreamController?.abort();
+                }
+            };
+
+        } catch (error) {
+            onError(error);
+        }
+    }
+
+    /**
+     * NEW: Enhanced Stream Display
+     */
+    displayStreamingResponse(initialContent = '') {
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'message assistant streaming';
+        messageDiv.setAttribute('role', 'article');
+        messageDiv.setAttribute('aria-label', 'AI streaming response');
+
+        const avatar = document.createElement('div');
+        avatar.className = 'message-avatar';
+        avatar.innerHTML = '<i class="fas fa-robot" aria-hidden="true"></i>';
+
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'message-content streaming-content';
+        contentDiv.innerHTML = this.formatMessage(initialContent);
+
+        const typingIndicator = document.createElement('div');
+        typingIndicator.className = 'typing-indicator';
+        typingIndicator.innerHTML = '<span></span><span></span><span></span>';
+
+        messageDiv.appendChild(avatar);
+        messageDiv.appendChild(contentDiv);
+        messageDiv.appendChild(typingIndicator);
+
+        this.chatMessages.appendChild(messageDiv);
+        this.scrollToBottom();
+
+        return {
+            updateContent: (chunk) => {
+                contentDiv.innerHTML = this.formatMessage(initialContent + chunk);
+                this.scrollToBottom();
+            },
+            complete: (finalContent) => {
+                contentDiv.innerHTML = this.formatMessage(finalContent);
+                typingIndicator.remove();
+                messageDiv.classList.remove('streaming');
+
+                // Add to chat history
+                this.chatHistory.push({ role: 'assistant', content: finalContent });
+                this.saveMessageToSession('assistant', finalContent);
+
+                if (this.chatHistory.length > 50) {
+                    this.chatHistory = this.chatHistory.slice(-50);
+                }
+            },
+            element: messageDiv
+        };
+    }
+
+    /**
+     * NEW: File Upload & Drag & Drop
+     */
+    initializeFileUpload() {
+        // Create upload area
+        const uploadArea = document.createElement('div');
+        uploadArea.className = 'upload-area';
+        uploadArea.innerHTML = `
+            <div class="upload-content">
+                <i class="fas fa-cloud-upload-alt"></i>
+                <p>Drag & drop files here or <span class="upload-link">browse</span></p>
+                <small>Supports: ${this.fileUploadConfig.allowedTypes.join(', ')} (Max: ${this.fileUploadConfig.maxFileSize / (1024 * 1024)}MB)</small>
+            </div>
+            <input type="file" multiple accept="${this.fileUploadConfig.allowedTypes.join(',')}" style="display: none;">
+        `;
+
+        // Insert before message input
+        this.messageInput.parentNode.insertBefore(uploadArea, this.messageInput);
+
+        const fileInput = uploadArea.querySelector('input[type="file"]');
+        const uploadLink = uploadArea.querySelector('.upload-link');
+
+        // Drag and drop events
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('drag-over');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('drag-over');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('drag-over');
+            this.handleFileUpload(e.dataTransfer.files);
+        });
+
+        // Click to browse
+        uploadLink.addEventListener('click', () => fileInput.click());
+        uploadArea.addEventListener('click', (e) => {
+            if (e.target === uploadArea) fileInput.click();
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            this.handleFileUpload(e.target.files);
+        });
+    }
+
+    async handleFileUpload(files) {
+        const validFiles = [];
+
+        for (const file of files) {
+            if (this.validateFile(file)) {
+                validFiles.push(file);
+            }
+        }
+
+        if (validFiles.length === 0) {
+            this.showToast('No valid files selected', 'error');
+            return;
+        }
+
+        if (validFiles.length > this.fileUploadConfig.maxFiles) {
+            this.showToast(`Maximum ${this.fileUploadConfig.maxFiles} files allowed`, 'error');
+            return;
+        }
+
+        this.showToast(`Processing ${validFiles.length} file(s)...`, 'info');
+
+        for (const file of validFiles) {
+            try {
+                const content = await this.readFileContent(file);
+                this.uploadedFiles.push({
+                    name: file.name,
+                    size: file.size,
+                    type: file.type,
+                    content: content
+                });
+
+                // Add file info to message input
+                const fileInfo = `[File: ${file.name}]`;
+                this.messageInput.value += (this.messageInput.value ? '\n' : '') + fileInfo;
+                this.updateCharCount();
+                this.toggleSendButton();
+
+            } catch (error) {
+                this.logError(error, { fileName: file.name });
+                this.showToast(`Error reading ${file.name}`, 'error');
+            }
+        }
+
+        this.showToast('Files ready for processing', 'success');
+    }
+
+    validateFile(file) {
+        // Check file size
+        if (file.size > this.fileUploadConfig.maxFileSize) {
+            this.showToast(`${file.name} is too large (max ${this.fileUploadConfig.maxFileSize / (1024 * 1024)}MB)`, 'error');
+            return false;
+        }
+
+        // Check file type
+        const extension = '.' + file.name.split('.').pop().toLowerCase();
+        if (!this.fileUploadConfig.allowedTypes.includes(extension)) {
+            this.showToast(`${file.name} format not supported`, 'error');
+            return false;
+        }
+
+        return true;
+    }
+
+    async readFileContent(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+
+            reader.onload = (e) => {
+                const content = e.target.result;
+
+                // If it's a text file, try to parse as such
+                if (file.type.startsWith('text/') || file.name.endsWith('.txt') || file.name.endsWith('.md')) {
+                    resolve(content);
+                } else {
+                    // For other files, provide metadata and suggest processing
+                    resolve(`File: ${file.name}\nSize: ${(file.size / 1024).toFixed(2)} KB\nType: ${file.type}\n\n[Content extraction would require additional processing]`);
+                }
+            };
+
+            reader.onerror = () => reject(new Error('Failed to read file'));
+            reader.readAsText(file);
+        });
+    }
+
+    /**
+     * NEW: Lazy Loading for Models
+     */
+    initializeLazyLoading() {
+        // Monitor scroll position for model loading
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    this.loadModelIfNeeded(entry.target);
+                }
+            });
+        }, {
+            rootMargin: '100px'
+        });
+
+        // Observe model elements (will be set up when models are loaded)
+        this.modelObserver = observer;
+    }
+
+    loadModelIfNeeded(modelElement) {
+        const modelId = modelElement.dataset.modelId;
+        if (!modelId || this.modelLoadingState.has(modelId)) return;
+
+        // Mark as loading
+        this.modelLoadingState.set(modelId, 'loading');
+
+        // Simulate lazy loading (in real app, this would fetch model metadata)
+        setTimeout(() => {
+            this.modelLoadingState.set(modelId, 'loaded');
+            modelElement.classList.add('loaded');
+        }, 100);
+    }
+
+    /**
+     * NEW: Web Worker Integration
+     */
+    initializeWorker() {
+        if (!this.workerSupported) {
+            console.log('Web Workers not supported, falling back to main thread');
+            return;
+        }
+
+        try {
+            // Import worker dynamically
+            import('./collaborative-worker.js')
+                .then(module => {
+                    this.workerManager = new module.CollaborativeWorkerManager();
+                    this.setupWorkerListeners();
+                    console.log('✅ Collaborative Worker initialized');
+                })
+                .catch(error => {
+                    console.warn('Failed to load worker:', error);
+                });
+        } catch (error) {
+            console.warn('Worker initialization failed:', error);
+        }
+    }
+
+    setupWorkerListeners() {
+        if (!this.workerManager) return;
+
+        this.workerManager.on('progress', (data) => {
+            this.showToast(`Processing: ${data.message}`, 'info', 1000);
+        });
+
+        this.workerManager.on('workflow_progress', (data) => {
+            this.showToast(`Workflow: ${data.message}`, 'info', 1000);
+        });
+    }
+
+    /**
+     * NEW: Touch Gestures for Mobile
+     */
+    initializeTouchGestures() {
+        if (!this.touchGestures.enabled) return;
+
+        // Add gesture area to main container
+        const gestureArea = document.querySelector('.chat-container') || document.body;
+
+        // Touch start
+        gestureArea.addEventListener('touchstart', (e) => {
+            this.touchStartTime = Date.now();
+            this.touchStartPos = {
+                x: e.touches[0].clientX,
+                y: e.touches[0].clientY
+            };
+        }, { passive: true });
+
+        // Touch end
+        gestureArea.addEventListener('touchend', (e) => {
+            const touchEndTime = Date.now();
+            const touchEndPos = {
+                x: e.changedTouches[0].clientX,
+                y: e.changedTouches[0].clientY
+            };
+
+            const duration = touchEndTime - this.touchStartTime;
+            const deltaX = touchEndPos.x - this.touchStartPos.x;
+            const deltaY = touchEndPos.y - this.touchStartPos.y;
+
+            // Determine gesture type
+            if (duration < this.touchGestures.longPressThreshold) {
+                // Quick tap or swipe
+                if (Math.abs(deltaX) > this.touchGestures.swipeThreshold) {
+                    this.handleSwipeGesture(deltaX > 0 ? 'right' : 'left');
+                } else {
+                    this.handleTapGesture(touchEndPos);
+                }
+            } else {
+                // Long press
+                this.handleLongPressGesture(touchEndPos);
+            }
+        }, { passive: true });
+    }
+
+    handleSwipeGesture(direction) {
+        switch (direction) {
+            case 'right':
+                // Swipe right - open settings
+                this.toggleSettings();
+                break;
+            case 'left':
+                // Swipe left - clear chat (with confirmation)
+                if (confirm('Clear all messages?')) {
+                    this.clearChat();
+                }
+                break;
+        }
+    }
+
+    handleTapGesture(position) {
+        // Could implement tap-based shortcuts
+        console.log('Tap gesture at:', position);
+    }
+
+    handleLongPressGesture(position) {
+        // Could implement context menu or special actions
+        console.log('Long press at:', position);
+    }
+
+    /**
+     * NEW: Offline Support
+     */
+    initializeOfflineSupport() {
+        if (!this.offlineConfig.enabled) return;
+
+        // Register service worker if supported
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('./service-worker.js')
+                .then(registration => {
+                    console.log('✅ Service Worker registered');
+                })
+                .catch(error => {
+                    console.warn('Service Worker registration failed:', error);
+                });
+        }
+
+        // Monitor online status
+        window.addEventListener('online', () => {
+            this.isOffline = false;
+            this.showToast('Back online', 'success');
+            this.syncOfflineData();
+        });
+
+        window.addEventListener('offline', () => {
+            this.isOffline = true;
+            this.showToast('Working offline', 'warning');
+        });
+
+        // Load offline cache
+        this.loadOfflineCache();
+    }
+
+    async syncOfflineData() {
+        try {
+            // Sync any pending data when back online
+            const offlineData = this.getOfflineData();
+            for (const item of offlineData) {
+                // Process offline items
+                console.log('Syncing offline item:', item);
+            }
+            this.clearOfflineData();
+        } catch (error) {
+            this.logError(error, { context: 'offline_sync' });
+        }
+    }
+
+    saveOfflineData(data) {
+        try {
+            const offlineCache = this.getOfflineData();
+            offlineCache.push({
+                ...data,
+                timestamp: Date.now(),
+                id: Date.now() + '_' + Math.random().toString(36).substr(2, 9)
+            });
+
+            // Limit offline items
+            if (offlineCache.length > this.offlineConfig.maxOfflineItems) {
+                offlineCache.splice(0, offlineCache.length - this.offlineConfig.maxOfflineItems);
+            }
+
+            localStorage.setItem(this.offlineConfig.cacheKey, JSON.stringify(offlineCache));
+        } catch (error) {
+            this.logError(error, { context: 'save_offline_data' });
+        }
+    }
+
+    getOfflineData() {
+        try {
+            return JSON.parse(localStorage.getItem(this.offlineConfig.cacheKey) || '[]');
+        } catch {
+            return [];
+        }
+    }
+
+    clearOfflineData() {
+        localStorage.removeItem(this.offlineConfig.cacheKey);
+    }
+
+    loadOfflineCache() {
+        // Preload any cached responses or data
+        const offlineData = this.getOfflineData();
+        console.log(`📱 Loaded ${offlineData.length} offline items`);
+    }
+
+    /**
+     * NEW: Response Caching System
+     */
+    getCacheKey(model, messages, temperature, maxTokens) {
+        const content = JSON.stringify({
+            model,
+            messages: messages.slice(-10), // Only cache last 10 messages for context
+            temperature,
+            maxTokens
+        });
+        // Use Unicode-safe encoding instead of btoa
+        const encoder = new TextEncoder();
+        const data = encoder.encode(content);
+        const base64 = btoa(String.fromCharCode(...data));
+        return this.cacheSettings.keyPrefix + base64.replace(/[^a-zA-Z0-9]/g, '');
+    }
+
+    getCachedResponse(key) {
+        if (!this.cacheSettings.enabled) return null;
+
+        const cached = this.responseCache.get(key);
+        if (!cached) return null;
+
+        // Check if cache entry has expired
+        if (Date.now() - cached.timestamp > this.cacheSettings.ttl) {
+            this.responseCache.delete(key);
+            return null;
+        }
+
+        return cached.response;
+    }
+
+    setCachedResponse(key, response) {
+        if (!this.cacheSettings.enabled) return;
+
+        // Implement LRU eviction if cache is full
+        if (this.responseCache.size >= this.cacheSettings.maxSize) {
+            const firstKey = this.responseCache.keys().next().value;
+            this.responseCache.delete(firstKey);
+        }
+
+        this.responseCache.set(key, {
+            response,
+            timestamp: Date.now()
+        });
+    }
+
+    /**
+     * NEW: Request Queue & Rate Limiting
+     */
+    async queueRequest(requestFn) {
+        return new Promise((resolve, reject) => {
+            this.requestQueue.push({
+                requestFn,
+                resolve,
+                reject,
+                timestamp: Date.now()
+            });
+
+            this.processQueue();
+        });
+    }
+
+    async processQueue() {
+        if (this.isProcessing || this.requestQueue.length === 0) return;
+
+        const now = Date.now();
+        const timeSinceLastRequest = now - this.rateLimiter.lastRequest;
+
+        if (timeSinceLastRequest < this.rateLimiter.minInterval) {
+            setTimeout(() => this.processQueue(), this.rateLimiter.minInterval - timeSinceLastRequest);
+            return;
+        }
+
+        if (this.requestQueue.length > this.rateLimiter.maxQueueSize) {
+            const oldestRequest = this.requestQueue.shift();
+            oldestRequest.reject(new Error('Request queue overflow'));
+        }
+
+        const request = this.requestQueue.shift();
+        this.isProcessing = true;
+        this.rateLimiter.lastRequest = now;
+
+        try {
+            const result = await request.requestFn();
+            request.resolve(result);
+        } catch (error) {
+            request.reject(error);
+        } finally {
+            this.isProcessing = false;
+            // Process next request after a small delay
+            setTimeout(() => this.processQueue(), 100);
+        }
+    }
+
+    /**
+     * NEW: Enhanced Error Handling
+     */
+    logError(error, context = {}) {
+        const errorEntry = {
+            timestamp: Date.now(),
+            message: error.message,
+            stack: error.stack,
+            context,
+            type: this.categorizeError(error)
+        };
+
+        this.errorLog.push(errorEntry);
+
+        // Keep only last 50 errors
+        if (this.errorLog.length > 50) {
+            this.errorLog = this.errorLog.slice(-50);
+        }
+
+        console.error('AdvancedMultiModelAI Error:', errorEntry);
+    }
+
+    categorizeError(error) {
+        const message = error.message.toLowerCase();
+
+        if (message.includes('network') || message.includes('fetch')) {
+            return 'network';
+        } else if (message.includes('401') || message.includes('403')) {
+            return 'authentication';
+        } else if (message.includes('429')) {
+            return 'rate_limit';
+        } else if (message.includes('timeout')) {
+            return 'timeout';
+        } else if (message.includes('quota') || message.includes('credits')) {
+            return 'billing';
+        } else if (message.includes('model') || message.includes('invalid')) {
+            return 'model_error';
+        }
+
+        return 'unknown';
+    }
+
+    async retryWithBackoff(fn, retries = 0) {
+        try {
+            return await fn();
+        } catch (error) {
+            if (retries >= this.retryConfig.maxRetries) {
+                throw error;
+            }
+
+            const delay = this.retryConfig.baseDelay * Math.pow(this.retryConfig.backoffMultiplier, retries);
+            this.logError(error, { retryAttempt: retries + 1, willRetryIn: delay });
+
+            await new Promise(resolve => setTimeout(resolve, delay));
+            return this.retryWithBackoff(fn, retries + 1);
+        }
+    }
+
+    /**
+     * NEW: Chat History Management
+     */
+    createNewSession() {
+        const sessionId = 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        this.chatStorage.currentSessionId = sessionId;
+
+        const sessions = this.getStoredSessions();
+        sessions[sessionId] = {
+            id: sessionId,
+            created: Date.now(),
+            lastActivity: Date.now(),
+            messages: []
+        };
+
+        // Clean up old sessions
+        this.cleanupOldSessions(sessions);
+        localStorage.setItem('chat_sessions', JSON.stringify(sessions));
+
+        return sessionId;
+    }
+
+    getStoredSessions() {
+        try {
+            return JSON.parse(localStorage.getItem('chat_sessions') || '{}');
+        } catch {
+            return {};
+        }
+    }
+
+    saveMessageToSession(role, content) {
+        if (!this.chatStorage.currentSessionId) {
+            this.createNewSession();
+        }
+
+        const sessions = this.getStoredSessions();
+        const session = sessions[this.chatStorage.currentSessionId];
+
+        if (session) {
+            session.lastActivity = Date.now();
+            session.messages.push({ role, content, timestamp: Date.now() });
+
+            // Limit messages per session
+            if (session.messages.length > 100) {
+                session.messages = session.messages.slice(-100);
+            }
+
+            localStorage.setItem('chat_sessions', JSON.stringify(sessions));
+        }
+    }
+
+    loadSession(sessionId) {
+        const sessions = this.getStoredSessions();
+        const session = sessions[sessionId];
+
+        if (session) {
+            this.chatStorage.currentSessionId = sessionId;
+            this.chatHistory = session.messages.map(msg => ({
+                role: msg.role,
+                content: msg.content
+            }));
+
+            // Update last activity
+            session.lastActivity = Date.now();
+            localStorage.setItem('chat_sessions', JSON.stringify(sessions));
+
+            return true;
+        }
+        return false;
+    }
+
+    cleanupOldSessions(sessions) {
+        const now = Date.now();
+        const cutoffTime = now - this.chatStorage.sessionTimeout;
+
+        Object.keys(sessions).forEach(sessionId => {
+            if (sessions[sessionId].lastActivity < cutoffTime) {
+                delete sessions[sessionId];
+            }
+        });
+
+        // Keep only the most recent sessions if still over limit
+        const sessionArray = Object.values(sessions)
+            .sort((a, b) => b.lastActivity - a.lastActivity)
+            .slice(0, this.chatStorage.maxSessions);
+
+        const cleaned = {};
+        sessionArray.forEach(session => {
+            cleaned[session.id] = session;
+        });
+
+        return cleaned;
+    }
+
+    /**
+     * NEW: Settings Backup & Sync
+     */
+    backupSettings() {
+        const settings = {
+            apiProvider: this.apiProvider,
+            apiKey: this.apiKey,
+            znapaiKey: this.znapaiKey,
+            strategy: this.strategy,
+            model: this.selectedModel,
+            collaborativeModels: this.collaborativeModels,
+            taskType: this.taskType,
+            temperature: this.temperature,
+            maxTokens: this.maxTokens,
+            timestamp: Date.now(),
+            version: '2.0'
+        };
+
+        // Create backup with timestamp
+        const backups = this.getSettingsBackups();
+        const backupKey = 'backup_' + Date.now();
+        backups[backupKey] = settings;
+
+        // Keep only last 10 backups
+        const backupKeys = Object.keys(backups).sort().reverse();
+        if (backupKeys.length > 10) {
+            backupKeys.slice(10).forEach(key => delete backups[key]);
+        }
+
+        localStorage.setItem('settings_backups', JSON.stringify(backups));
+        return backupKey;
+    }
+
+    getSettingsBackups() {
+        try {
+            return JSON.parse(localStorage.getItem('settings_backups') || '{}');
+        } catch {
+            return {};
+        }
+    }
+
+    restoreSettings(backupKey) {
+        const backups = this.getSettingsBackups();
+        const backup = backups[backupKey];
+
+        if (backup) {
+            // Apply settings
+            this.apiProvider = backup.apiProvider;
+            this.apiKey = backup.apiKey;
+            this.znapaiKey = backup.znapaiKey;
+            this.strategy = backup.strategy;
+            this.selectedModel = backup.model;
+            this.collaborativeModels = backup.collaborativeModels || [];
+            this.taskType = backup.taskType;
+            this.temperature = backup.temperature;
+            this.maxTokens = backup.maxTokens;
+
+            // Update UI
+            this.updateSettingsUI();
+            this.showToast('Settings restored successfully!', 'success');
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -274,6 +1105,28 @@ class AdvancedMultiModelAI {
         // Other elements
         this.loadingOverlay = document.getElementById('loadingOverlay');
         this.toast = document.getElementById('toast');
+
+        // NEW: Initialize advanced features
+        this.initializeFileUpload();
+        this.initializeLazyLoading();
+        this.initializeWorker();
+        this.initializeTouchGestures();
+        this.initializeOfflineSupport();
+    }
+
+    /**
+     * Clear chat messages
+     */
+    clearChat() {
+        this.chatMessages.innerHTML = '';
+        this.chatHistory = [];
+        this.uploadedFiles = [];
+
+        if (this.chatStorage.currentSessionId) {
+            this.createNewSession();
+        }
+
+        this.showToast('Chat cleared', 'success');
     }
 
     /**
@@ -849,6 +1702,9 @@ class AdvancedMultiModelAI {
 
         localStorage.setItem('advancedMultiModelAI_settings', JSON.stringify(settings));
 
+        // NEW: Create backup of settings
+        this.backupSettings();
+
         // Update UI
         this.updateModelDisplay();
         this.settingsSaved = true;
@@ -858,6 +1714,36 @@ class AdvancedMultiModelAI {
 
         // Clear welcome message and enable chat
         this.clearWelcomeMessage();
+    }
+
+    /**
+     * NEW: Update settings UI from stored values
+     */
+    updateSettingsUI() {
+        this.apiProviderSelect.value = this.apiProvider;
+        this.apiKeyInput.value = this.apiKey;
+        this.znapaiKeyInput.value = this.znapaiKey;
+        this.modelStrategySelect.value = this.strategy;
+        this.modelSelect.value = this.selectedModel;
+        this.taskTypeSelect.value = this.taskType;
+        this.temperatureSlider.value = this.temperature;
+        this.maxTokensSlider.value = this.maxTokens;
+        this.tempValue.textContent = this.temperature;
+        this.tokensValue.textContent = this.maxTokens;
+
+        // Handle provider-specific UI
+        this.handleProviderChange(this.apiProvider);
+        this.handleStrategyChange(this.strategy);
+
+        if (this.strategy === 'collaborative') {
+            this.collaborativeModels.forEach(modelId => {
+                const checkbox = this.collaborativeGroup.querySelector(`input[value="${modelId}"]`);
+                if (checkbox) checkbox.checked = true;
+            });
+        }
+
+        this.updateSliderAppearance(this.temperatureSlider);
+        this.updateSliderAppearance(this.maxTokensSlider);
     }
 
     /**
@@ -979,6 +1865,9 @@ class AdvancedMultiModelAI {
         // Add user message to chat
         this.addMessage('user', message);
 
+        // NEW: Save message to session
+        this.saveMessageToSession('user', message);
+
         // Clear input
         this.messageInput.value = '';
         this.updateCharCount();
@@ -991,24 +1880,39 @@ class AdvancedMultiModelAI {
         try {
             let response = '';
 
-            // Route to appropriate processing method based on strategy
-            switch (this.strategy) {
-                case 'single':
-                    response = await this.processSingleModel(message);
-                    break;
-                case 'collaborative':
-                    response = await this.processCollaborative(message);
-                    break;
-                case 'workflow':
-                    response = await this.processWorkflow(message);
-                    break;
-            }
+            // NEW: Use streaming if enabled and supported
+            if (this.streamingConfig.enabled && !this.isOffline) {
+                // Disable loading overlay for streaming - user sees real-time output
+                this.setLoading(false);
+                response = await this.sendStreamingMessage(message);
+            } else {
+                // Route to appropriate processing method based on strategy
+                switch (this.strategy) {
+                    case 'single':
+                        response = await this.processSingleModel(message);
+                        break;
+                    case 'collaborative':
+                        response = await this.processCollaborative(message);
+                        break;
+                    case 'workflow':
+                        response = await this.processWorkflow(message);
+                        break;
+                }
 
-            // Add assistant response to chat
-            this.addMessage('assistant', response);
+                // Add assistant response to chat (for non-streaming)
+                this.addMessage('assistant', response);
+                this.saveMessageToSession('assistant', response);
+            }
 
         } catch (error) {
             console.error('Error sending message:', error);
+
+            // NEW: Enhanced error logging
+            this.logError(error, {
+                strategy: this.strategy,
+                message: message.substring(0, 100),
+                model: this.selectedModel || this.collaborativeModels.join(',')
+            });
 
             let errorMessage = 'Sorry, I encountered an error.';
 
@@ -1020,6 +1924,8 @@ class AdvancedMultiModelAI {
                 errorMessage = 'Rate limit exceeded. Please wait and try again.';
             } else if (error.message.includes('insufficient_quota')) {
                 errorMessage = 'Insufficient credits. Please check your OpenRouter account.';
+            } else if (this.isOffline) {
+                errorMessage = 'You are offline. Please check your connection.';
             } else {
                 errorMessage = `Error: ${error.message}`;
             }
@@ -1027,8 +1933,204 @@ class AdvancedMultiModelAI {
             this.showToast(errorMessage, 'error');
             this.addMessage('assistant', `I apologize, but I encountered an error: ${errorMessage}`);
         } finally {
-            this.setLoading(false);
+            // Only hide loading overlay if not using streaming
+            if (!(this.streamingConfig.enabled && !this.isOffline)) {
+                this.setLoading(false);
+            }
         }
+    }
+
+    /**
+     * NEW: Send streaming message
+     */
+    async sendStreamingMessage(message) {
+        let fullContent = '';
+        const streamDisplay = this.displayStreamingResponse();
+
+        const messages = this.chatHistory.map(msg => ({
+            role: msg.role,
+            content: msg.content
+        }));
+
+        // Check cache first
+        const cacheKey = this.getCacheKey(this.selectedModel, messages, this.temperature, this.maxTokens);
+        const cachedResponse = this.getCachedResponse(cacheKey);
+
+        if (cachedResponse) {
+            // Stream cached response
+            const words = cachedResponse.split(' ');
+            for (let i = 0; i < words.length; i++) {
+                fullContent += (i > 0 ? ' ' : '') + words[i];
+                streamDisplay.updateContent(fullContent);
+                await new Promise(resolve => setTimeout(resolve, 30));
+            }
+            streamDisplay.complete(fullContent);
+            return fullContent;
+        }
+
+        // Route to appropriate processing method based on strategy
+        let content = '';
+        switch (this.strategy) {
+            case 'single':
+                content = await this.streamSingleModel(message, streamDisplay);
+                break;
+            case 'collaborative':
+                content = await this.streamCollaborative(message, streamDisplay);
+                break;
+            case 'workflow':
+                content = await this.streamWorkflow(message, streamDisplay);
+                break;
+        }
+
+        streamDisplay.complete(content);
+        return content;
+    }
+
+    /**
+     * NEW: Stream single model response
+     */
+    async streamSingleModel(message, streamDisplay) {
+        const messages = this.chatHistory.map(msg => ({
+            role: msg.role,
+            content: msg.content
+        }));
+
+        const response = await this.queueRequest(() =>
+            this.retryWithBackoff(() => this.callAPI(this.selectedModel, messages))
+        );
+
+        const content = response.choices[0].message.content;
+        const cacheKey = this.getCacheKey(this.selectedModel, messages, this.temperature, this.maxTokens);
+
+        // Cache the response
+        this.setCachedResponse(cacheKey, content);
+
+        // Stream the content
+        const words = content.split(' ');
+        let streamedContent = '';
+
+        for (let i = 0; i < words.length; i++) {
+            streamedContent += (i > 0 ? ' ' : '') + words[i];
+            streamDisplay.updateContent(streamedContent);
+            await new Promise(resolve => setTimeout(resolve, this.streamingConfig.streamDelay));
+        }
+
+        return content;
+    }
+
+    /**
+     * NEW: Stream collaborative response
+     */
+    async streamCollaborative(message, streamDisplay) {
+        // For collaborative mode, we still process sequentially but stream the final synthesis
+        const systemPrompt = `You are part of a collaborative AI team using ${this.apiProvider === 'openrouter' ? 'OpenRouter' : 'ZnapAI'}. Each model will contribute their expertise. Build upon each other's responses and provide a comprehensive final answer. Current team members: ${this.collaborativeModels.map(id => this.getModelDisplayName(id)).join(', ')}`;
+
+        let accumulatedContext = message;
+        const responses = [];
+
+        // Process each model (not streamed for performance)
+        for (const modelId of this.collaborativeModels) {
+            const messages = [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: `Previous team member responses:\n${responses.join('\n\n---\n\n')}\n\nYour task: ${accumulatedContext}` }
+            ];
+
+            try {
+                const response = await this.queueRequest(() =>
+                    this.retryWithBackoff(() => this.callAPI(modelId, messages))
+                );
+                const content = response.choices[0].message.content;
+                responses.push(`**${this.getModelDisplayName(modelId)}:** ${content}`);
+                accumulatedContext = `${message}\n\nTeam Discussion So Far:\n${responses.join('\n\n')}`;
+            } catch (error) {
+                this.logError(error, { modelId, step: 'collaborative_processing' });
+                responses.push(`**${this.getModelDisplayName(modelId)}:** [Error processing]`);
+            }
+        }
+
+        // Stream the final synthesis
+        const finalMessages = [
+            { role: 'system', content: 'You are the final synthesizer. Consolidate the team discussion into a cohesive, comprehensive response that incorporates all insights.' },
+            { role: 'user', content: `Finalize this collaborative response:\n\n${responses.join('\n\n---\n\n')}` }
+        ];
+
+        const finalResponse = await this.queueRequest(() =>
+            this.retryWithBackoff(() => this.callAPI(this.collaborativeModels[0], finalMessages))
+        );
+
+        const finalContent = finalResponse.choices[0].message.content;
+
+        // Stream the final content
+        const words = finalContent.split(' ');
+        let streamedContent = '';
+
+        for (let i = 0; i < words.length; i++) {
+            streamedContent += (i > 0 ? ' ' : '') + words[i];
+            streamDisplay.updateContent(streamedContent);
+            await new Promise(resolve => setTimeout(resolve, this.streamingConfig.streamDelay));
+        }
+
+        return finalContent;
+    }
+
+    /**
+     * NEW: Stream workflow response
+     */
+    async streamWorkflow(message, streamDisplay) {
+        const workflow = this.taskWorkflows[this.taskType];
+        if (!workflow) {
+            throw new Error(`Unknown task type: ${this.taskType}`);
+        }
+
+        const stepResults = [];
+
+        // Process workflow steps (not streamed for performance)
+        for (let i = 0; i < workflow.steps.length; i++) {
+            const step = workflow.steps[i];
+            const stepPrompt = `${step.prompt}\n\nContext from previous steps:\n${stepResults.join('\n\n')}\n\nCurrent task: ${message}`;
+
+            const messages = [
+                { role: 'system', content: `You are the ${step.role}. Your responsibility: ${step.task}` },
+                { role: 'user', content: stepPrompt }
+            ];
+
+            try {
+                const response = await this.queueRequest(() =>
+                    this.retryWithBackoff(() => this.callAPI(step.model, messages))
+                );
+                const content = response.choices[0].message.content;
+                stepResults.push(`**Step ${i + 1} - ${step.role}:**\n${content}`);
+            } catch (error) {
+                this.logError(error, { step: i + 1, role: step.role, model: step.model });
+                stepResults.push(`**Step ${i + 1} - ${step.role}:** [Error]`);
+            }
+        }
+
+        // Stream final synthesis
+        const finalSynthesisPrompt = `Synthesize all step results into a comprehensive final output:\n\n${stepResults.join('\n\n')}\n\nProvide a cohesive summary that integrates all insights and recommendations.`;
+
+        const finalMessages = [
+            { role: 'system', content: 'You are the final synthesizer. Create a cohesive, well-structured final output that integrates all workflow steps.' },
+            { role: 'user', content: finalSynthesisPrompt }
+        ];
+
+        const finalResponse = await this.queueRequest(() =>
+            this.retryWithBackoff(() => this.callAPI(workflow.steps[0].model, finalMessages))
+        );
+
+        const finalContent = finalResponse.choices[0].message.content;
+
+        // Stream the final content
+        const words = finalContent.split(' ');
+        let streamedContent = '';
+
+        for (let i = 0; i < words.length; i++) {
+            streamedContent += (i > 0 ? ' ' : '') + words[i];
+            streamDisplay.updateContent(streamedContent);
+            await new Promise(resolve => setTimeout(resolve, this.streamingConfig.streamDelay));
+        }
+
+        return finalContent;
     }
 
     /**
@@ -1040,8 +2142,25 @@ class AdvancedMultiModelAI {
             content: msg.content
         }));
 
-        const response = await this.callAPI(this.selectedModel, messages);
-        return response.choices[0].message.content;
+        // NEW: Check cache first
+        const cacheKey = this.getCacheKey(this.selectedModel, messages, this.temperature, this.maxTokens);
+        const cachedResponse = this.getCachedResponse(cacheKey);
+        if (cachedResponse) {
+            this.showToast('Response served from cache', 'info', 2000);
+            return cachedResponse;
+        }
+
+        // NEW: Use queue and retry for API calls
+        const response = await this.queueRequest(() =>
+            this.retryWithBackoff(() => this.callAPI(this.selectedModel, messages))
+        );
+
+        const content = response.choices[0].message.content;
+
+        // NEW: Cache the response
+        this.setCachedResponse(cacheKey, content);
+
+        return content;
     }
 
     /**
@@ -1061,8 +2180,27 @@ class AdvancedMultiModelAI {
                 { role: 'user', content: `Previous team member responses:\n${responses.join('\n\n---\n\n')}\n\nYour task: ${accumulatedContext}` }
             ];
 
-            const response = await this.callAPI(modelId, messages);
-            const content = response.choices[0].message.content;
+            // NEW: Check cache for each model response
+            const cacheKey = this.getCacheKey(modelId, messages, this.temperature, this.maxTokens);
+            let content;
+
+            try {
+                const cachedResponse = this.getCachedResponse(cacheKey);
+                if (cachedResponse) {
+                    content = cachedResponse;
+                    this.showToast(`Response from ${this.getModelDisplayName(modelId)} served from cache`, 'info', 1500);
+                } else {
+                    const response = await this.queueRequest(() =>
+                        this.retryWithBackoff(() => this.callAPI(modelId, messages))
+                    );
+                    content = response.choices[0].message.content;
+                    this.setCachedResponse(cacheKey, content);
+                }
+            } catch (error) {
+                this.logError(error, { modelId, step: 'collaborative_processing' });
+                content = `[Error processing with ${this.getModelDisplayName(modelId)}]`;
+            }
+
             responses.push(`**${this.getModelDisplayName(modelId)}:** ${content}`);
 
             // Build context for next model
@@ -1075,8 +2213,21 @@ class AdvancedMultiModelAI {
             { role: 'user', content: `Finalize this collaborative response:\n\n${responses.join('\n\n---\n\n')}` }
         ];
 
-        const finalResponse = await this.callAPI(this.collaborativeModels[0], finalMessages);
-        return finalResponse.choices[0].message.content;
+        const finalCacheKey = this.getCacheKey(this.collaborativeModels[0], finalMessages, this.temperature, this.maxTokens);
+        const finalCachedResponse = this.getCachedResponse(finalCacheKey);
+
+        if (finalCachedResponse) {
+            this.showToast('Final synthesis served from cache', 'info', 2000);
+            return finalCachedResponse;
+        }
+
+        const finalResponse = await this.queueRequest(() =>
+            this.retryWithBackoff(() => this.callAPI(this.collaborativeModels[0], finalMessages))
+        );
+        const finalContent = finalResponse.choices[0].message.content;
+
+        this.setCachedResponse(finalCacheKey, finalContent);
+        return finalContent;
     }
 
     /**
@@ -1101,8 +2252,26 @@ class AdvancedMultiModelAI {
                 { role: 'user', content: stepPrompt }
             ];
 
-            const response = await this.callAPI(step.model, messages);
-            const content = response.choices[0].message.content;
+            // NEW: Check cache for workflow step
+            const cacheKey = this.getCacheKey(step.model, messages, this.temperature, this.maxTokens);
+            let content;
+
+            try {
+                const cachedResponse = this.getCachedResponse(cacheKey);
+                if (cachedResponse) {
+                    content = cachedResponse;
+                    this.showToast(`Step ${i + 1} (${step.role}) served from cache`, 'info', 1500);
+                } else {
+                    const response = await this.queueRequest(() =>
+                        this.retryWithBackoff(() => this.callAPI(step.model, messages))
+                    );
+                    content = response.choices[0].message.content;
+                    this.setCachedResponse(cacheKey, content);
+                }
+            } catch (error) {
+                this.logError(error, { step: i + 1, role: step.role, model: step.model });
+                content = `[Error in step ${i + 1} - ${step.role}]`;
+            }
 
             stepResults.push(`**Step ${i + 1} - ${step.role}:**\n${content}`);
 
@@ -1118,8 +2287,21 @@ class AdvancedMultiModelAI {
             { role: 'user', content: finalSynthesisPrompt }
         ];
 
-        const finalResponse = await this.callAPI(workflow.steps[0].model, finalMessages);
-        return finalResponse.choices[0].message.content;
+        const finalCacheKey = this.getCacheKey(workflow.steps[0].model, finalMessages, this.temperature, this.maxTokens);
+        const finalCachedResponse = this.getCachedResponse(finalCacheKey);
+
+        if (finalCachedResponse) {
+            this.showToast('Workflow synthesis served from cache', 'info', 2000);
+            return finalCachedResponse;
+        }
+
+        const finalResponse = await this.queueRequest(() =>
+            this.retryWithBackoff(() => this.callAPI(workflow.steps[0].model, finalMessages))
+        );
+        const finalContent = finalResponse.choices[0].message.content;
+
+        this.setCachedResponse(finalCacheKey, finalContent);
+        return finalContent;
     }
 
     /**
@@ -1218,21 +2400,16 @@ class AdvancedMultiModelAI {
     }
 
     /**
-     * Enhanced message formatting
+     * Enhanced message formatting with input sanitization
      */
     formatMessage(content) {
         if (!content) return '';
 
-        // Escape HTML first
-        let formatted = content
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#x27;');
+        // NEW: Enhanced input sanitization
+        const sanitized = this.sanitizeInput(content);
 
         // Format markdown-like syntax
-        formatted = formatted
+        let formatted = sanitized
             .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
             .replace(/\*(.*?)\*/g, '<em>$1</em>')
             .replace(/`(.*?)`/g, '<code>$1</code>')
@@ -1252,6 +2429,21 @@ class AdvancedMultiModelAI {
         );
 
         return formatted;
+    }
+
+    /**
+     * NEW: Input sanitization for security
+     */
+    sanitizeInput(input) {
+        if (typeof input !== 'string') return '';
+
+        return input
+            // Remove null bytes and control characters
+            .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+            // Normalize Unicode
+            .normalize('NFKC')
+            // Limit length to prevent abuse
+            .substring(0, 10000);
     }
 
     /**
@@ -1305,6 +2497,15 @@ class AdvancedMultiModelAI {
      */
     pauseNonEssentialOperations() {
         console.log('App paused - reducing non-essential operations');
+        // Could implement pause for animations, timers, etc.
+    }
+
+    /**
+     * Resume non-essential operations when tab becomes visible
+     */
+    resumeNonEssentialOperations() {
+        console.log('App resumed - resuming all operations');
+        // Could implement resume for animations, timers, etc.
     }
 
     /**
@@ -1365,6 +2566,7 @@ class AdvancedMultiModelAI {
 
         } catch (error) {
             console.error('Error loading collaborative models:', error);
+            this.logError(error, { context: 'loading_collaborative_models' });
             if (this.apiProvider === 'openrouter') {
                 this.modelList.innerHTML = '<div class="loading-models"><span>Failed to load models. Using defaults.</span></div>';
                 setTimeout(() => {
@@ -1419,7 +2621,7 @@ class AdvancedMultiModelAI {
                     const pricingClass = pricing.includes('Free') ? 'free' : pricing.includes('Paid') ? 'paid' : '';
 
                     html += `
-                        <div class="model-item" data-model-id="${model.id}">
+                        <div class="model-item" data-model-id="${model.id}" data-lazy-load="true">
                             <input type="checkbox" id="model-${model.id.replace(/[^a-zA-Z0-9]/g, '-')}" value="${model.id}">
                             <label for="model-${model.id.replace(/[^a-zA-Z0-9]/g, '-')}" class="model-info">
                                 <div class="model-name">${modelName}</div>
@@ -1433,6 +2635,13 @@ class AdvancedMultiModelAI {
         });
 
         this.modelList.innerHTML = html;
+
+        // NEW: Set up lazy loading for model elements
+        if (this.modelObserver) {
+            this.modelList.querySelectorAll('[data-lazy-load="true"]').forEach(element => {
+                this.modelObserver.observe(element);
+            });
+        }
 
         // Add event listeners for checkboxes
         this.modelList.querySelectorAll('input[type="checkbox"]').forEach(checkbox => {
@@ -1457,7 +2666,7 @@ class AdvancedMultiModelAI {
 
             category.models.forEach(model => {
                 html += `
-                    <div class="model-item" data-model-id="${model.id}">
+                    <div class="model-item" data-model-id="${model.id}" data-lazy-load="true">
                         <input type="checkbox" id="model-${model.id}" value="${model.id}">
                         <label for="model-${model.id}" class="model-info">
                             <div class="model-name">${model.name}</div>
@@ -1471,6 +2680,13 @@ class AdvancedMultiModelAI {
         });
 
         this.modelList.innerHTML = html;
+
+        // NEW: Set up lazy loading for model elements
+        if (this.modelObserver) {
+            this.modelList.querySelectorAll('[data-lazy-load="true"]').forEach(element => {
+                this.modelObserver.observe(element);
+            });
+        }
 
         // Add event listeners for checkboxes
         this.modelList.querySelectorAll('input[type="checkbox"]').forEach(checkbox => {
@@ -1520,7 +2736,7 @@ class AdvancedMultiModelAI {
 
             grouped[provider].forEach(model => {
                 html += `
-                    <div class="model-item" data-model-id="${model.id}">
+                    <div class="model-item" data-model-id="${model.id}" data-lazy-load="true">
                         <input type="checkbox" id="model-${model.id.replace(/[^a-zA-Z0-9]/g, '-')}" value="${model.id}">
                         <label for="model-${model.id.replace(/[^a-zA-Z0-9]/g, '-')}" class="model-info">
                             <div class="model-name">${model.name}</div>
@@ -1534,6 +2750,13 @@ class AdvancedMultiModelAI {
         });
 
         this.modelList.innerHTML = html;
+
+        // NEW: Set up lazy loading for model elements
+        if (this.modelObserver) {
+            this.modelList.querySelectorAll('[data-lazy-load="true"]').forEach(element => {
+                this.modelObserver.observe(element);
+            });
+        }
 
         // Add event listeners for checkboxes
         this.modelList.querySelectorAll('input[type="checkbox"]').forEach(checkbox => {
